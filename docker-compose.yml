@@ -1,0 +1,15 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - DB_PATH=/data/admin.db
+    volumes:
+      - quest_data:/data
+
+volumes:
+  quest_data:
