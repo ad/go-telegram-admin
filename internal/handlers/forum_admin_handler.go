@@ -475,6 +475,9 @@ func (h *ForumAdminHandler) showSettingsMenu(ctx context.Context, chatID int64, 
 			{
 				{Text: "💾 Бэкап", CallbackData: "settings_backup"},
 			},
+			{
+				{Text: "← Назад", CallbackData: "cancel"},
+			},
 		},
 	}
 
