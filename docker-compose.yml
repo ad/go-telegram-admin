@@ -9,7 +9,7 @@ services:
       - ADMIN_IDS=${ADMIN_IDS}
       - DB_PATH=/data/admin.db
     volumes:
-      - quest_data:/data
+      - admin_data:/data
 
 volumes:
-  quest_data:
+  admin_data:
