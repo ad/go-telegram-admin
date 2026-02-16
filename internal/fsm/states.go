@@ -80,6 +80,12 @@ const (
 	StateAdminEditGroupID                = "admin_edit_group_id"
 	StateAdminEditGroupLink              = "admin_edit_group_link"
 
+	// Reply States
+	StateReplyEnterLink     = "reply_enter_link"
+	StateReplyEnterText     = "reply_enter_text"
+	StateReplyConfirm       = "reply_confirm"
+	StateEditReplyEnterText = "edit_reply_enter_text"
+
 	// Forum Post Manager States
 	StateNewPostSelectType    = "new_post_select_type"
 	StateNewPostEnterText     = "new_post_enter_text"

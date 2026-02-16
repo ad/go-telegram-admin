@@ -30,6 +30,7 @@ func setupForumAdminHandler(t *testing.T) (*ForumAdminHandler, *sql.DB) {
 	adminConfigRepo := db.NewAdminConfigRepository(queue)
 	postTypeRepo := db.NewPostTypeRepository(queue)
 	publishedPostRepo := db.NewPublishedPostRepository(queue)
+	replyRepo := db.NewReplyRepository(queue)
 	adminStateRepo := db.NewAdminStateRepository(queue)
 
 	authMiddleware := services.NewAdminAuthMiddleware(adminConfigRepo)
@@ -44,6 +45,7 @@ func setupForumAdminHandler(t *testing.T) (*ForumAdminHandler, *sql.DB) {
 		adminConfigRepo,
 		postTypeRepo,
 		publishedPostRepo,
+		replyRepo,
 		adminStateRepo,
 		postManager,
 		postTypeManager,

@@ -53,11 +53,27 @@ CREATE TABLE IF NOT EXISTS admin_config (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS replies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    reply_to_message_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    photo_id TEXT DEFAULT '',
+    entities TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(chat_id, message_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_published_posts_message ON published_posts(chat_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_post_types_active ON post_types(is_active);
+CREATE INDEX IF NOT EXISTS idx_replies_message ON replies(chat_id, message_id);
 `
 
-const migrations = ``
+const migrations = `
+ALTER TABLE admin_state ADD COLUMN reply_target_chat_id INTEGER DEFAULT 0;
+ALTER TABLE admin_state ADD COLUMN reply_target_message_id INTEGER DEFAULT 0
+`
 
 func InitSchema(db *sql.DB) error {
 	_, err := db.Exec(schema)
@@ -72,7 +88,7 @@ func InitSchema(db *sql.DB) error {
 			continue
 		}
 		if _, err := db.Exec(stmt); err != nil {
-			log.Printf("Migration %d failed: %s. Error: %v", i, stmt, err)
+			// log.Printf("Migration %d failed: %s. Error: %v", i, stmt, err)
 		} else {
 			log.Printf("Migration %d executed: %s", i, stmt)
 		}

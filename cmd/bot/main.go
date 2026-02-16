@@ -52,6 +52,7 @@ func main() {
 
 	postTypeRepo := db.NewPostTypeRepository(dbQueue)
 	publishedPostRepo := db.NewPublishedPostRepository(dbQueue)
+	replyRepo := db.NewReplyRepository(dbQueue)
 	adminConfigRepo := db.NewAdminConfigRepository(dbQueue)
 	adminStateRepo := db.NewAdminStateRepository(dbQueue)
 
@@ -145,6 +146,7 @@ func main() {
 		adminConfigRepo,
 		postTypeRepo,
 		publishedPostRepo,
+		replyRepo,
 		adminStateRepo,
 		postManager,
 		postTypeManager,

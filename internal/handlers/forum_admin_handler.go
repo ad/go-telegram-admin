@@ -34,6 +34,7 @@ type ForumAdminHandler struct {
 	adminConfigRepo   *db.AdminConfigRepository
 	postTypeRepo      *db.PostTypeRepository
 	publishedPostRepo *db.PublishedPostRepository
+	replyRepo         *db.ReplyRepository
 	adminStateRepo    *db.AdminStateRepository
 	postManager       *services.PostManager
 	postTypeManager   *services.PostTypeManager
@@ -47,6 +48,7 @@ func NewForumAdminHandler(
 	adminConfigRepo *db.AdminConfigRepository,
 	postTypeRepo *db.PostTypeRepository,
 	publishedPostRepo *db.PublishedPostRepository,
+	replyRepo *db.ReplyRepository,
 	adminStateRepo *db.AdminStateRepository,
 	postManager *services.PostManager,
 	postTypeManager *services.PostTypeManager,
@@ -59,6 +61,7 @@ func NewForumAdminHandler(
 		adminConfigRepo:   adminConfigRepo,
 		postTypeRepo:      postTypeRepo,
 		publishedPostRepo: publishedPostRepo,
+		replyRepo:         replyRepo,
 		adminStateRepo:    adminStateRepo,
 		postManager:       postManager,
 		postTypeManager:   postTypeManager,
@@ -148,6 +151,15 @@ func (h *ForumAdminHandler) HandleMessage(ctx context.Context, msg *tgmodels.Mes
 		return true
 	case fsm.StateEditTopicID:
 		h.handleEditTopicIDInput(ctx, msg, state)
+		return true
+	case fsm.StateReplyEnterLink:
+		h.handleReplyLinkInput(ctx, msg, state)
+		return true
+	case fsm.StateReplyEnterText:
+		h.handleReplyTextInput(ctx, msg, state)
+		return true
+	case fsm.StateEditReplyEnterText:
+		h.handleEditReplyTextInput(ctx, msg, state)
 		return true
 	default:
 		return false
@@ -323,6 +335,101 @@ func (h *ForumAdminHandler) HandleCallback(ctx context.Context, callback *tgmode
 			return false
 		}
 		h.handleToggleTypeActive(ctx, callback.From.ID, chatID, messageID, typeID)
+		return true
+	}
+
+	if data == "admin_reply" {
+		h.handleReplyStart(ctx, callback.From.ID, chatID, messageID)
+		return true
+	}
+
+	if data == "confirm_reply" {
+		h.handleReplyConfirmation(ctx, callback.From.ID, chatID, messageID)
+		return true
+	}
+
+	if data == "admin_reply_list" {
+		h.showReplyList(ctx, chatID, messageID, 0)
+		return true
+	}
+
+	if data == "reply_list_back" {
+		h.showAdminMenu(ctx, chatID, messageID)
+		return true
+	}
+
+	if strings.HasPrefix(data, "reply_list_page:") {
+		pageStr := strings.TrimPrefix(data, "reply_list_page:")
+		page, err := strconv.Atoi(pageStr)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse reply list page: %v", err)
+			return false
+		}
+		h.showReplyList(ctx, chatID, messageID, page)
+		return true
+	}
+
+	if strings.HasPrefix(data, "reply_details:") {
+		// format: reply_details:{replyID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "reply_details:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		replyID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return false
+		}
+		page, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return false
+		}
+		h.showReplyDetails(ctx, chatID, messageID, replyID, page)
+		return true
+	}
+
+	if strings.HasPrefix(data, "reply_list_delete_confirm:") {
+		// format: reply_list_delete_confirm:{replyID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "reply_list_delete_confirm:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		replyID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return false
+		}
+		h.handleDeleteReplyFromList(ctx, callback.From.ID, chatID, messageID, replyID)
+		return true
+	}
+
+	if strings.HasPrefix(data, "reply_list_delete:") {
+		// format: reply_list_delete:{replyID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "reply_list_delete:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		replyID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return false
+		}
+		page, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return false
+		}
+		h.showDeleteReplyConfirm(ctx, chatID, messageID, replyID, page)
+		return true
+	}
+
+	if strings.HasPrefix(data, "reply_list_edit:") {
+		// format: reply_list_edit:{replyID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "reply_list_edit:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		replyID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return false
+		}
+		h.handleEditReplyFromList(ctx, callback.From.ID, chatID, messageID, replyID)
 		return true
 	}
 
@@ -523,6 +630,12 @@ func (h *ForumAdminHandler) showAdminMenu(ctx context.Context, chatID int64, mes
 			},
 			{
 				{Text: "📋 Список постов", CallbackData: "admin_post_list"},
+			},
+			{
+				{Text: "💬 Ответить на сообщение", CallbackData: "admin_reply"},
+			},
+			{
+				{Text: "📨 Список ответов", CallbackData: "admin_reply_list"},
 			},
 			{
 				{Text: "⚙️ Настройки", CallbackData: "admin_settings"},
@@ -1537,6 +1650,780 @@ func (h *ForumAdminHandler) handleDeletePostFromList(ctx context.Context, userID
 
 	h.showAdminMenu(ctx, chatID, messageID)
 }
+
+// ─── Reply flow ───────────────────────────────────────────────────────────────
+
+func (h *ForumAdminHandler) handleReplyStart(ctx context.Context, userID, chatID int64, messageID int) {
+	state := &models.AdminState{
+		UserID:       userID,
+		CurrentState: fsm.StateReplyEnterLink,
+	}
+	if messageID > 0 {
+		// When we edit an existing bot message as a prompt, remember it so it can be deleted
+		// after user sends the link.
+		state.LastBotMessageID = messageID
+	}
+
+	err := h.adminStateRepo.Save(state)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+		return
+	}
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{{Text: "❌ Отмена", CallbackData: "cancel"}},
+		},
+	}
+
+	if messageID > 0 {
+		_, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        "Отправьте ссылку на сообщение, на которое нужно ответить",
+			ReplyMarkup: keyboard,
+		})
+	} else {
+		var sentMsg *tgmodels.Message
+		sentMsg, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        "Отправьте ссылку на сообщение, на которое нужно ответить",
+			ReplyMarkup: keyboard,
+		})
+		if err == nil && sentMsg != nil {
+			state, _ := h.adminStateRepo.Get(userID)
+			if state != nil {
+				state.LastBotMessageID = sentMsg.ID
+				h.adminStateRepo.Save(state)
+			}
+		}
+	}
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to show reply start: %v", err)
+	}
+}
+
+func (h *ForumAdminHandler) handleReplyLinkInput(ctx context.Context, msg *tgmodels.Message, state *models.AdminState) {
+	if state.LastBotMessageID > 0 {
+		h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: state.LastBotMessageID})
+		state.LastBotMessageID = 0
+	}
+
+	sendError := func(text string) {
+		sentMsg, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   text,
+			ReplyMarkup: &tgmodels.InlineKeyboardMarkup{
+				InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+					{{Text: "❌ Отмена", CallbackData: "cancel"}},
+				},
+			},
+		})
+		if err == nil && sentMsg != nil {
+			state.LastBotMessageID = sentMsg.ID
+			h.adminStateRepo.Save(state)
+		}
+	}
+
+	if msg.Text == "" {
+		sendError("❌ Пожалуйста, отправьте ссылку на сообщение")
+		return
+	}
+
+	chatID, messageID, threadID, err := h.postManager.ParsePostLinkFull(msg.Text)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to parse reply link: %v", err)
+		sendError("❌ Неверный формат ссылки. Используйте ссылку вида https://t.me/c/<chat>/<message>")
+		return
+	}
+
+	if chatID == 0 {
+		config, err := h.adminConfigRepo.Get()
+		if err == nil {
+			chatID = config.ForumChatID
+		}
+	}
+
+	state.ReplyTargetChatID = chatID
+	state.ReplyTargetMessageID = messageID
+	state.TempName = fmt.Sprintf("%d", threadID)
+	state.CurrentState = fsm.StateReplyEnterText
+	if err = h.adminStateRepo.Save(state); err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+		return
+	}
+
+	sentMsg, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: msg.Chat.ID,
+		Text:   "Отправьте текст ответа. Можно прикрепить фото к сообщению.",
+		ReplyMarkup: &tgmodels.InlineKeyboardMarkup{
+			InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+				{{Text: "❌ Отмена", CallbackData: "cancel"}},
+			},
+		},
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to send reply text prompt: %v", err)
+	} else if sentMsg != nil {
+		state.LastBotMessageID = sentMsg.ID
+		h.adminStateRepo.Save(state)
+	}
+}
+
+func (h *ForumAdminHandler) handleReplyTextInput(ctx context.Context, msg *tgmodels.Message, state *models.AdminState) {
+	if state.LastBotMessageID > 0 {
+		h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: state.LastBotMessageID})
+		state.LastBotMessageID = 0
+	}
+
+	text := msg.Text
+	photoID := ""
+	if msg.Photo != nil && len(msg.Photo) > 0 {
+		photoID = msg.Photo[len(msg.Photo)-1].FileID
+		if text == "" {
+			text = msg.Caption
+		}
+	}
+
+	if text == "" && photoID == "" {
+		sentMsg, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "❌ Пожалуйста, отправьте текст или фото с текстом",
+			ReplyMarkup: &tgmodels.InlineKeyboardMarkup{
+				InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+					{{Text: "❌ Отмена", CallbackData: "cancel"}},
+				},
+			},
+		})
+		if err == nil && sentMsg != nil {
+			state.LastBotMessageID = sentMsg.ID
+			h.adminStateRepo.Save(state)
+		}
+		return
+	}
+
+	entities := msg.Entities
+	if photoID != "" {
+		entities = msg.CaptionEntities
+	}
+
+	state.DraftText = text
+	state.DraftPhotoID = photoID
+	if len(entities) > 0 {
+		entJSON, _ := json.Marshal(entities)
+		state.DraftEntities = string(entJSON)
+	} else {
+		state.DraftEntities = ""
+	}
+	state.CurrentState = fsm.StateReplyConfirm
+	if err := h.adminStateRepo.Save(state); err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+		return
+	}
+
+	previewPrefix := "Предпросмотр ответа:\n\n"
+	previewText := previewPrefix + text
+
+	var previewEntities []tgmodels.MessageEntity
+	if len(entities) > 0 {
+		offset := utf16Length(previewPrefix)
+		for _, e := range entities {
+			e.Offset += offset
+			previewEntities = append(previewEntities, e)
+		}
+	}
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{{Text: "✅ Подтвердить", CallbackData: "confirm_reply"}},
+			{{Text: "❌ Отмена", CallbackData: "cancel"}},
+		},
+	}
+
+	var err error
+	if photoID != "" {
+		_, err = h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:          msg.Chat.ID,
+			Photo:           &tgmodels.InputFileString{Data: photoID},
+			Caption:         previewText,
+			CaptionEntities: previewEntities,
+			ReplyMarkup:     keyboard,
+		})
+	} else {
+		_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      msg.Chat.ID,
+			Text:        previewText,
+			Entities:    previewEntities,
+			ReplyMarkup: keyboard,
+		})
+	}
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to send reply preview: %v", err)
+	}
+}
+
+func (h *ForumAdminHandler) handleReplyConfirmation(ctx context.Context, userID, chatID int64, messageID int) {
+	state, err := h.adminStateRepo.Get(userID)
+	if err != nil || state == nil || state.CurrentState != fsm.StateReplyConfirm {
+		log.Printf("[FORUM_ADMIN] Invalid state for reply confirmation")
+		return
+	}
+
+	threadID := int64(0)
+	if state.TempName != "" {
+		threadID, _ = strconv.ParseInt(state.TempName, 10, 64)
+	}
+
+	var entities []tgmodels.MessageEntity
+	if state.DraftEntities != "" {
+		json.Unmarshal([]byte(state.DraftEntities), &entities)
+	}
+
+	sendAttempt := func(replyToID, useThreadID int64) (*tgmodels.Message, error) {
+		replyParams := &tgmodels.ReplyParameters{MessageID: int(replyToID)}
+		log.Printf("[FORUM_ADMIN] Reply send attempt: chat=%d thread=%d reply_to=%d", state.ReplyTargetChatID, useThreadID, replyToID)
+
+		if state.DraftPhotoID != "" {
+			return h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+				ChatID:          state.ReplyTargetChatID,
+				MessageThreadID: int(useThreadID),
+				Photo:           &tgmodels.InputFileString{Data: state.DraftPhotoID},
+				Caption:         state.DraftText,
+				CaptionEntities: entities,
+				ReplyParameters: replyParams,
+			})
+		}
+		return h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          state.ReplyTargetChatID,
+			MessageThreadID: int(useThreadID),
+			Text:            state.DraftText,
+			Entities:        entities,
+			ReplyParameters: replyParams,
+		})
+	}
+
+	var sentMsg *tgmodels.Message
+	attempts := [][2]int64{{state.ReplyTargetMessageID, threadID}}
+	if threadID > 0 && threadID != state.ReplyTargetMessageID {
+		attempts = append(attempts,
+			[2]int64{threadID, threadID},
+			[2]int64{state.ReplyTargetMessageID, 0},
+			[2]int64{threadID, 0},
+		)
+	}
+
+	for _, a := range attempts {
+		sentMsg, err = sendAttempt(a[0], a[1])
+		if err == nil {
+			state.ReplyTargetMessageID = a[0]
+			break
+		}
+	}
+
+	if err != nil || sentMsg == nil {
+		log.Printf("[FORUM_ADMIN] Failed to send reply: %v", err)
+		h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+			Text:      fmt.Sprintf("❌ Не удалось отправить ответ: %v", err),
+		})
+		return
+	}
+
+	reply := &models.Reply{
+		ChatID:           state.ReplyTargetChatID,
+		ReplyToMessageID: state.ReplyTargetMessageID,
+		MessageID:        int64(sentMsg.ID),
+		Text:             state.DraftText,
+		PhotoID:          state.DraftPhotoID,
+		Entities:         state.DraftEntities,
+	}
+	if err := h.replyRepo.Create(reply); err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save reply to DB: %v", err)
+	}
+
+	h.adminStateRepo.Clear(userID)
+
+	h.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "✅ Ответ успешно отправлен!",
+	})
+	h.showAdminMenu(ctx, chatID, 0)
+
+	log.Printf("[FORUM_ADMIN] Reply sent by user %d, saved as reply ID %d", userID, reply.ID)
+}
+
+const replyListPageSize = 10
+
+func (h *ForumAdminHandler) showReplyList(ctx context.Context, chatID int64, messageID int, page int) {
+	total, err := h.replyRepo.Count()
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to count replies: %v", err)
+		return
+	}
+
+	offset := int64(page * replyListPageSize)
+	replies, err := h.replyRepo.GetPaginated(replyListPageSize, offset)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get paginated replies: %v", err)
+		return
+	}
+
+	totalPages := int((total + replyListPageSize - 1) / replyListPageSize)
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	var text string
+	if total == 0 {
+		text = "Список ответов пуст"
+	} else {
+		text = fmt.Sprintf("Список ответов (стр. %d/%d)", page+1, totalPages)
+	}
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: make([][]tgmodels.InlineKeyboardButton, 0),
+	}
+
+	for _, reply := range replies {
+		previewText := strings.TrimSpace(reply.Text)
+		if previewText == "" && reply.PhotoID != "" {
+			previewText = "Изображение"
+		}
+		preview := []rune(previewText)
+		if len(preview) > 30 {
+			preview = append(preview[:30], []rune("...")...)
+		}
+		buttonText := fmt.Sprintf("%s — %s", reply.CreatedAt.Format("02.01.06 15:04"), string(preview))
+		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, []tgmodels.InlineKeyboardButton{
+			{Text: buttonText, CallbackData: fmt.Sprintf("reply_details:%d:%d", reply.ID, page)},
+		})
+	}
+
+	var navRow []tgmodels.InlineKeyboardButton
+	if totalPages > 1 && page > 0 {
+		navRow = append(navRow, tgmodels.InlineKeyboardButton{
+			Text:         "← Пред.",
+			CallbackData: fmt.Sprintf("reply_list_page:%d", page-1),
+		})
+	}
+	navRow = append(navRow, tgmodels.InlineKeyboardButton{
+		Text:         "← Назад",
+		CallbackData: "reply_list_back",
+	})
+	if totalPages > 1 && page < totalPages-1 {
+		navRow = append(navRow, tgmodels.InlineKeyboardButton{
+			Text:         "След. →",
+			CallbackData: fmt.Sprintf("reply_list_page:%d", page+1),
+		})
+	}
+	keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, navRow)
+
+	if messageID > 0 {
+		_, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: keyboard,
+			})
+		}
+	} else {
+		_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+	}
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to show reply list: %v", err)
+	}
+}
+
+func (h *ForumAdminHandler) showReplyDetails(ctx context.Context, chatID int64, messageID int, replyID int64, page int) {
+	reply, err := h.replyRepo.GetByID(replyID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get reply %d: %v", replyID, err)
+		return
+	}
+
+	displayText := reply.Text
+	if reply.Entities == "" {
+		preview := []rune(displayText)
+		if len(preview) > 200 {
+			displayText = string(append(preview[:200], []rune("...")...))
+		}
+	}
+
+	prefix := fmt.Sprintf("Ответ #%d\nДата: %s\n\nТекст:\n",
+		reply.ID,
+		reply.CreatedAt.Format("02.01.2006 15:04"),
+	)
+	text := prefix + displayText
+
+	var previewEntities []tgmodels.MessageEntity
+	if reply.Entities != "" {
+		var storedEntities []tgmodels.MessageEntity
+		if err := json.Unmarshal([]byte(reply.Entities), &storedEntities); err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse reply entities for %d: %v", reply.ID, err)
+		} else {
+			prefixOffset := utf16Length(prefix)
+			textLen := utf16Length(displayText)
+			for _, e := range storedEntities {
+				if e.Length <= 0 || e.Offset < 0 || e.Offset >= textLen {
+					continue
+				}
+				if e.Offset+e.Length > textLen {
+					e.Length = textLen - e.Offset
+				}
+				e.Offset += prefixOffset
+				previewEntities = append(previewEntities, e)
+			}
+		}
+	}
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{{Text: "✏️ Редактировать", CallbackData: fmt.Sprintf("reply_list_edit:%d:%d", reply.ID, page)}},
+			{{Text: "🗑 Удалить", CallbackData: fmt.Sprintf("reply_list_delete:%d:%d", reply.ID, page)}},
+			{{Text: "← Назад", CallbackData: fmt.Sprintf("reply_list_page:%d", page)}},
+		},
+	}
+
+	if reply.PhotoID != "" {
+		captionPrefix := fmt.Sprintf("Ответ #%d\nДата: %s\n\nПодпись:\n",
+			reply.ID,
+			reply.CreatedAt.Format("02.01.2006 15:04"),
+		)
+		caption := captionPrefix
+		if strings.TrimSpace(reply.Text) != "" {
+			caption += reply.Text
+		} else {
+			caption += "—"
+		}
+
+		var captionEntities []tgmodels.MessageEntity
+		if reply.Entities != "" {
+			var storedEntities []tgmodels.MessageEntity
+			if err := json.Unmarshal([]byte(reply.Entities), &storedEntities); err != nil {
+				log.Printf("[FORUM_ADMIN] Failed to parse reply entities for %d: %v", reply.ID, err)
+			} else {
+				prefixOffset := utf16Length(captionPrefix)
+				textLen := utf16Length(reply.Text)
+				for _, e := range storedEntities {
+					if e.Length <= 0 || e.Offset < 0 || e.Offset >= textLen {
+						continue
+					}
+					if e.Offset+e.Length > textLen {
+						e.Length = textLen - e.Offset
+					}
+					e.Offset += prefixOffset
+					captionEntities = append(captionEntities, e)
+				}
+			}
+		}
+
+		if messageID > 0 {
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+				ChatID:    chatID,
+				MessageID: messageID,
+			})
+		}
+		_, err = h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:          chatID,
+			Photo:           &tgmodels.InputFileString{Data: reply.PhotoID},
+			Caption:         caption,
+			CaptionEntities: captionEntities,
+			ReplyMarkup:     keyboard,
+		})
+	} else {
+		if messageID > 0 {
+			_, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID:      chatID,
+				MessageID:   messageID,
+				Text:        text,
+				Entities:    previewEntities,
+				ReplyMarkup: keyboard,
+			})
+			if err != nil {
+				_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+					ChatID:      chatID,
+					Text:        text,
+					Entities:    previewEntities,
+					ReplyMarkup: keyboard,
+				})
+			}
+		} else {
+			_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				Entities:    previewEntities,
+				ReplyMarkup: keyboard,
+			})
+		}
+	}
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to show reply details: %v", err)
+	}
+}
+
+func (h *ForumAdminHandler) showDeleteReplyConfirm(ctx context.Context, chatID int64, messageID int, replyID int64, page int) {
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{{Text: "✅ Да, удалить", CallbackData: fmt.Sprintf("reply_list_delete_confirm:%d:%d", replyID, page)}},
+			{{Text: "← Назад", CallbackData: fmt.Sprintf("reply_details:%d:%d", replyID, page)}},
+		},
+	}
+	text := "Удалить этот ответ? Это действие нельзя отменить."
+
+	if messageID > 0 {
+		_, err := h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: keyboard,
+			})
+		}
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to edit delete reply confirm: %v", err)
+		}
+	} else {
+		_, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to send delete reply confirm: %v", err)
+		}
+	}
+}
+
+func (h *ForumAdminHandler) handleEditReplyFromList(ctx context.Context, userID, chatID int64, messageID int, replyID int64) {
+	reply, err := h.replyRepo.GetByID(replyID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get reply %d: %v", replyID, err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "❌ Ошибка получения ответа"})
+		return
+	}
+
+	err = h.adminStateRepo.Save(&models.AdminState{
+		UserID:        userID,
+		CurrentState:  fsm.StateEditReplyEnterText,
+		EditingPostID: reply.ID,
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+		return
+	}
+
+	if messageID > 0 {
+		h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: messageID})
+	}
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{{Text: "❌ Отмена", CallbackData: "cancel"}},
+		},
+	}
+
+	var sentMsg *tgmodels.Message
+	if reply.PhotoID != "" {
+		previewCaption := "Текущий ответ (изображение):\n\n"
+		if reply.Text != "" {
+			previewCaption += reply.Text + "\n\n"
+		}
+		previewCaption += "Отправьте новый текст или фото с подписью."
+
+		var previewCaptionEntities []tgmodels.MessageEntity
+		if reply.Entities != "" {
+			var ents []tgmodels.MessageEntity
+			if err := json.Unmarshal([]byte(reply.Entities), &ents); err == nil {
+				off := utf16Length("Текущий ответ (изображение):\n\n")
+				for _, e := range ents {
+					e.Offset += off
+					previewCaptionEntities = append(previewCaptionEntities, e)
+				}
+			}
+		}
+
+		sentMsg, err = h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:          chatID,
+			Photo:           &tgmodels.InputFileString{Data: reply.PhotoID},
+			Caption:         previewCaption,
+			CaptionEntities: previewCaptionEntities,
+			ReplyMarkup:     keyboard,
+		})
+	} else {
+		previewText := fmt.Sprintf("Текущий текст ответа:\n\n%s\n\nОтправьте новый текст или фото с подписью.", reply.Text)
+		var previewEntities []tgmodels.MessageEntity
+		if reply.Entities != "" {
+			var ents []tgmodels.MessageEntity
+			if err := json.Unmarshal([]byte(reply.Entities), &ents); err == nil {
+				prefix := "Текущий текст ответа:\n\n"
+				off := utf16Length(prefix)
+				for _, e := range ents {
+					e.Offset += off
+					previewEntities = append(previewEntities, e)
+				}
+			}
+		}
+
+		sentMsg, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        previewText,
+			Entities:    previewEntities,
+			ReplyMarkup: keyboard,
+		})
+	}
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to send edit reply prompt: %v", err)
+	} else if sentMsg != nil {
+		state, _ := h.adminStateRepo.Get(userID)
+		if state != nil {
+			state.LastBotMessageID = sentMsg.ID
+			h.adminStateRepo.Save(state)
+		}
+	}
+}
+
+func (h *ForumAdminHandler) handleEditReplyTextInput(ctx context.Context, msg *tgmodels.Message, state *models.AdminState) {
+	if state.LastBotMessageID > 0 {
+		h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: msg.Chat.ID, MessageID: state.LastBotMessageID})
+		state.LastBotMessageID = 0
+	}
+
+	text := msg.Text
+	entities := msg.Entities
+	newPhotoID := ""
+	if msg.Photo != nil && len(msg.Photo) > 0 {
+		newPhotoID = msg.Photo[len(msg.Photo)-1].FileID
+		if msg.Caption != "" || text == "" {
+			text = msg.Caption
+		}
+		entities = msg.CaptionEntities
+	}
+
+	if text == "" && newPhotoID == "" {
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "❌ Пожалуйста, отправьте новый текст или фото с подписью"})
+		return
+	}
+
+	reply, err := h.replyRepo.GetByID(state.EditingPostID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get reply: %v", err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "❌ Ошибка получения ответа"})
+		return
+	}
+
+	if newPhotoID != "" {
+		if reply.PhotoID == "" {
+			h.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: msg.Chat.ID,
+				Text:   "❌ Нельзя заменить текстовый ответ на фото. Удалите этот ответ и создайте новый.",
+			})
+			return
+		}
+		_, err = h.bot.EditMessageMedia(ctx, &bot.EditMessageMediaParams{
+			ChatID:    reply.ChatID,
+			MessageID: int(reply.MessageID),
+			Media: &tgmodels.InputMediaPhoto{
+				Media:           newPhotoID,
+				Caption:         text,
+				CaptionEntities: entities,
+			},
+		})
+	} else if reply.PhotoID != "" {
+		_, err = h.bot.EditMessageCaption(ctx, &bot.EditMessageCaptionParams{
+			ChatID:          reply.ChatID,
+			MessageID:       int(reply.MessageID),
+			Caption:         text,
+			CaptionEntities: entities,
+		})
+	} else {
+		_, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    reply.ChatID,
+			MessageID: int(reply.MessageID),
+			Text:      text,
+			Entities:  entities,
+		})
+	}
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to edit reply in Telegram: %v", err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: fmt.Sprintf("❌ Не удалось отредактировать ответ: %v", err)})
+		return
+	}
+
+	reply.Text = text
+	if newPhotoID != "" {
+		reply.PhotoID = newPhotoID
+	}
+	if len(entities) > 0 {
+		entJSON, _ := json.Marshal(entities)
+		reply.Entities = string(entJSON)
+	} else {
+		reply.Entities = ""
+	}
+	if err := h.replyRepo.Update(reply); err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to update reply in DB: %v", err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "❌ Ошибка сохранения изменений"})
+		return
+	}
+
+	h.adminStateRepo.Clear(state.UserID)
+
+	h.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "✅ Ответ успешно отредактирован!"})
+	h.showAdminMenu(ctx, msg.Chat.ID, 0)
+
+	log.Printf("[FORUM_ADMIN] Reply %d edited by user %d", reply.ID, state.UserID)
+}
+
+func (h *ForumAdminHandler) handleDeleteReplyFromList(ctx context.Context, userID, chatID int64, messageID int, replyID int64) {
+	reply, err := h.replyRepo.GetByID(replyID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get reply %d: %v", replyID, err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: "❌ Ошибка получения ответа"})
+		return
+	}
+
+	_, err = h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+		ChatID:    reply.ChatID,
+		MessageID: int(reply.MessageID),
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to delete reply from Telegram: %v", err)
+	}
+
+	if err := h.replyRepo.Delete(reply.ID); err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to delete reply from DB: %v", err)
+		h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+			Text:      "❌ Ошибка удаления ответа из базы данных",
+		})
+		return
+	}
+
+	log.Printf("[FORUM_ADMIN] Reply %d deleted from list by user %d", replyID, userID)
+	h.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "✅ Ответ успешно удалён!",
+	})
+	h.showAdminMenu(ctx, chatID, 0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 func (h *ForumAdminHandler) handleNewTypeStart(ctx context.Context, userID, chatID int64, messageID int) {
 	err := h.adminStateRepo.Save(&models.AdminState{
