@@ -141,3 +141,42 @@ func (r *PublishedPostRepository) Delete(id int64) error {
 	})
 	return err
 }
+
+func (r *PublishedPostRepository) Count() (int64, error) {
+	var count int64
+	err := r.queue.DB().QueryRow(`SELECT COUNT(*) FROM published_posts`).Scan(&count)
+	return count, err
+}
+
+func (r *PublishedPostRepository) GetPaginated(limit, offset int64) ([]*models.PublishedPost, error) {
+	rows, err := r.queue.DB().Query(`
+		SELECT id, post_type_id, chat_id, topic_id, message_id, text, photo_id, COALESCE(entities, ''), created_at
+		FROM published_posts
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?
+	`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var posts []*models.PublishedPost
+	for rows.Next() {
+		var post models.PublishedPost
+		if err := rows.Scan(
+			&post.ID,
+			&post.PostTypeID,
+			&post.ChatID,
+			&post.TopicID,
+			&post.MessageID,
+			&post.Text,
+			&post.PhotoID,
+			&post.Entities,
+			&post.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		posts = append(posts, &post)
+	}
+	return posts, rows.Err()
+}

@@ -326,6 +326,97 @@ func (h *ForumAdminHandler) HandleCallback(ctx context.Context, callback *tgmode
 		return true
 	}
 
+	if data == "admin_post_list" {
+		h.showPostList(ctx, chatID, messageID, 0)
+		return true
+	}
+
+	if data == "post_list_back" {
+		h.showAdminMenu(ctx, chatID, messageID)
+		return true
+	}
+
+	if strings.HasPrefix(data, "post_list_page:") {
+		pageStr := strings.TrimPrefix(data, "post_list_page:")
+		page, err := strconv.Atoi(pageStr)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse page: %v", err)
+			return false
+		}
+		h.showPostList(ctx, chatID, messageID, page)
+		return true
+	}
+
+	if strings.HasPrefix(data, "post_details:") {
+		// format: post_details:{postID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "post_details:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		postID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse post ID: %v", err)
+			return false
+		}
+		page, err := strconv.Atoi(parts[1])
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse page: %v", err)
+			return false
+		}
+		h.showPostDetails(ctx, chatID, messageID, postID, page)
+		return true
+	}
+
+	if strings.HasPrefix(data, "post_list_edit:") {
+		// format: post_list_edit:{postID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "post_list_edit:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		postID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse post ID: %v", err)
+			return false
+		}
+		h.handleEditPostFromList(ctx, callback.From.ID, chatID, messageID, postID)
+		return true
+	}
+
+	if strings.HasPrefix(data, "post_list_delete_confirm:") {
+		// format: post_list_delete_confirm:{postID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "post_list_delete_confirm:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		postID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse post ID: %v", err)
+			return false
+		}
+		h.handleDeletePostFromList(ctx, callback.From.ID, chatID, messageID, postID)
+		return true
+	}
+
+	if strings.HasPrefix(data, "post_list_delete:") {
+		// format: post_list_delete:{postID}:{page}
+		parts := strings.SplitN(strings.TrimPrefix(data, "post_list_delete:"), ":", 2)
+		if len(parts) != 2 {
+			return false
+		}
+		postID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse post ID: %v", err)
+			return false
+		}
+		page, err := strconv.Atoi(parts[1])
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to parse page: %v", err)
+			return false
+		}
+		h.showDeletePostConfirm(ctx, chatID, messageID, postID, page)
+		return true
+	}
+
 	return false
 }
 
@@ -429,6 +520,9 @@ func (h *ForumAdminHandler) showAdminMenu(ctx context.Context, chatID int64, mes
 			},
 			{
 				{Text: "🗑 Удалить пост", CallbackData: "admin_delete_post"},
+			},
+			{
+				{Text: "📋 Список постов", CallbackData: "admin_post_list"},
 			},
 			{
 				{Text: "⚙️ Настройки", CallbackData: "admin_settings"},
@@ -1141,6 +1235,307 @@ func (h *ForumAdminHandler) handleDeletePostLinkInput(ctx context.Context, msg *
 	h.showAdminMenu(ctx, msg.Chat.ID, 0)
 
 	log.Printf("[FORUM_ADMIN] Post %d deleted successfully by user %d", post.ID, msg.From.ID)
+}
+
+const postListPageSize = 10
+
+func (h *ForumAdminHandler) showPostList(ctx context.Context, chatID int64, messageID int, page int) {
+	total, err := h.publishedPostRepo.Count()
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to count posts: %v", err)
+		return
+	}
+
+	offset := int64(page * postListPageSize)
+	posts, err := h.publishedPostRepo.GetPaginated(postListPageSize, offset)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get paginated posts: %v", err)
+		return
+	}
+
+	totalPages := int((total + postListPageSize - 1) / postListPageSize)
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	var text string
+	if total == 0 {
+		text = "Список постов пуст"
+	} else {
+		text = fmt.Sprintf("Список постов (стр. %d/%d)", page+1, totalPages)
+	}
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: make([][]tgmodels.InlineKeyboardButton, 0),
+	}
+
+	for _, post := range posts {
+		postType, err := h.postTypeRepo.GetByID(post.PostTypeID)
+		var buttonText string
+		if err == nil {
+			typeLabel := postType.Name
+			if postType.Emoji != "" {
+				typeLabel = postType.Emoji + " " + postType.Name
+			}
+			buttonText = fmt.Sprintf("%s — %s", typeLabel, post.CreatedAt.Format("02.01.06 15:04"))
+		} else {
+			buttonText = fmt.Sprintf("#%d — %s", post.ID, post.CreatedAt.Format("02.01.06 15:04"))
+		}
+		keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, []tgmodels.InlineKeyboardButton{
+			{Text: buttonText, CallbackData: fmt.Sprintf("post_details:%d:%d", post.ID, page)},
+		})
+	}
+
+	// Navigation row: [← Пред.] [← Назад] [След. →]
+	var navRow []tgmodels.InlineKeyboardButton
+	if totalPages > 1 && page > 0 {
+		navRow = append(navRow, tgmodels.InlineKeyboardButton{
+			Text:         "← Пред.",
+			CallbackData: fmt.Sprintf("post_list_page:%d", page-1),
+		})
+	}
+	navRow = append(navRow, tgmodels.InlineKeyboardButton{
+		Text:         "Назад",
+		CallbackData: "post_list_back",
+	})
+	if totalPages > 1 && page < totalPages-1 {
+		navRow = append(navRow, tgmodels.InlineKeyboardButton{
+			Text:         "След. →",
+			CallbackData: fmt.Sprintf("post_list_page:%d", page+1),
+		})
+	}
+	keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, navRow)
+
+	if messageID > 0 {
+		_, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to edit post list: %v", err)
+		}
+	} else {
+		_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to send post list: %v", err)
+		}
+	}
+}
+
+func (h *ForumAdminHandler) showPostDetails(ctx context.Context, chatID int64, messageID int, postID int64, page int) {
+	post, err := h.publishedPostRepo.GetByID(postID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get post %d: %v", postID, err)
+		return
+	}
+
+	postType, err := h.postTypeRepo.GetByID(post.PostTypeID)
+	var typeLabel string
+	if err == nil {
+		typeLabel = postType.Name
+		if postType.Emoji != "" {
+			typeLabel = postType.Emoji + " " + postType.Name
+		}
+	} else {
+		typeLabel = fmt.Sprintf("ID %d", post.PostTypeID)
+	}
+
+	preview := post.Text
+	if len([]rune(preview)) > 200 {
+		runes := []rune(preview)
+		preview = string(runes[:200]) + "..."
+	}
+
+	text := fmt.Sprintf("Пост #%d\nТип: %s\nДата: %s\n\nТекст:\n%s",
+		post.ID,
+		typeLabel,
+		post.CreatedAt.Format("02.01.2006 15:04"),
+		preview,
+	)
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{
+				{Text: "✏️ Редактировать", CallbackData: fmt.Sprintf("post_list_edit:%d:%d", post.ID, page)},
+			},
+			{
+				{Text: "🗑 Удалить", CallbackData: fmt.Sprintf("post_list_delete:%d:%d", post.ID, page)},
+			},
+			{
+				{Text: "← Назад", CallbackData: fmt.Sprintf("post_list_page:%d", page)},
+			},
+		},
+	}
+
+	if messageID > 0 {
+		_, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to edit post details: %v", err)
+		}
+	} else {
+		_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to send post details: %v", err)
+		}
+	}
+}
+
+func (h *ForumAdminHandler) showDeletePostConfirm(ctx context.Context, chatID int64, messageID int, postID int64, page int) {
+	text := "Удалить этот пост? Это действие нельзя отменить."
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{
+				{Text: "✅ Да, удалить", CallbackData: fmt.Sprintf("post_list_delete_confirm:%d:%d", postID, page)},
+			},
+			{
+				{Text: "← Назад", CallbackData: fmt.Sprintf("post_details:%d:%d", postID, page)},
+			},
+		},
+	}
+
+	if messageID > 0 {
+		_, err := h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to edit delete confirm: %v", err)
+		}
+	} else {
+		_, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to send delete confirm: %v", err)
+		}
+	}
+}
+
+func (h *ForumAdminHandler) handleEditPostFromList(ctx context.Context, userID, chatID int64, messageID int, postID int64) {
+	post, err := h.publishedPostRepo.GetByID(postID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get post %d: %v", postID, err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "❌ Ошибка получения поста",
+		})
+		return
+	}
+
+	err = h.adminStateRepo.Save(&models.AdminState{
+		UserID:        userID,
+		CurrentState:  fsm.StateEditPostEnterText,
+		EditingPostID: post.ID,
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+		return
+	}
+
+	if messageID > 0 {
+		_, err = h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+		})
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to delete message: %v", err)
+		}
+	}
+
+	previewText := fmt.Sprintf("Текущий текст поста:\n\n%s\n\nОтправьте новый текст.", post.Text)
+	var previewEntities []tgmodels.MessageEntity
+	if post.Entities != "" {
+		var entities []tgmodels.MessageEntity
+		if err := json.Unmarshal([]byte(post.Entities), &entities); err == nil {
+			prefix := "Текущий текст поста:\n\n"
+			offset := utf16Length(prefix)
+			for _, e := range entities {
+				e.Offset += offset
+				previewEntities = append(previewEntities, e)
+			}
+		}
+	}
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{
+				{Text: "❌ Отмена", CallbackData: "cancel"},
+			},
+		},
+	}
+
+	sentMsg, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      chatID,
+		Text:        previewText,
+		Entities:    previewEntities,
+		ReplyMarkup: keyboard,
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to send edit prompt: %v", err)
+	} else if sentMsg != nil {
+		state, _ := h.adminStateRepo.Get(userID)
+		if state != nil {
+			state.LastBotMessageID = sentMsg.ID
+			h.adminStateRepo.Save(state)
+		}
+	}
+
+	log.Printf("[FORUM_ADMIN] Edit from list: post %d, user %d", postID, userID)
+}
+
+func (h *ForumAdminHandler) handleDeletePostFromList(ctx context.Context, userID, chatID int64, messageID int, postID int64) {
+	post, err := h.publishedPostRepo.GetByID(postID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get post %d: %v", postID, err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "❌ Ошибка получения поста",
+		})
+		return
+	}
+
+	_, err = h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+		ChatID:    post.ChatID,
+		MessageID: int(post.MessageID),
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to delete post from Telegram: %v", err)
+	}
+
+	err = h.postManager.DeletePost(ctx, post.ID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to delete post from DB: %v", err)
+		h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+			Text:      "❌ Ошибка удаления поста из базы данных",
+		})
+		return
+	}
+
+	log.Printf("[FORUM_ADMIN] Post %d deleted from list by user %d", postID, userID)
+
+	h.showAdminMenu(ctx, chatID, messageID)
 }
 
 func (h *ForumAdminHandler) handleNewTypeStart(ctx context.Context, userID, chatID int64, messageID int) {
