@@ -92,21 +92,21 @@ func InitializeAdminConfig(db *sql.DB) error {
 	topicID := strings.TrimSpace(getEnv("TOPIC_ID", "0"))
 
 	if adminIDs != "" {
-		_, err := db.Exec("INSERT OR REPLACE INTO admin_config (key, value) VALUES (?, ?)", "admin_ids", adminIDs)
+		_, err := db.Exec("INSERT OR IGNORE INTO admin_config (key, value) VALUES (?, ?)", "admin_ids", adminIDs)
 		if err != nil {
 			return err
 		}
 	}
 
 	if forumChatID != "0" {
-		_, err := db.Exec("INSERT OR REPLACE INTO admin_config (key, value) VALUES (?, ?)", "forum_chat_id", forumChatID)
+		_, err := db.Exec("INSERT OR IGNORE INTO admin_config (key, value) VALUES (?, ?)", "forum_chat_id", forumChatID)
 		if err != nil {
 			return err
 		}
 	}
 
 	if topicID != "0" {
-		_, err := db.Exec("INSERT OR REPLACE INTO admin_config (key, value) VALUES (?, ?)", "topic_id", topicID)
+		_, err := db.Exec("INSERT OR IGNORE INTO admin_config (key, value) VALUES (?, ?)", "topic_id", topicID)
 		if err != nil {
 			return err
 		}

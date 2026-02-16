@@ -58,13 +58,16 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// Apply env vars only if not already set in DB (seed on first run only).
 	if adminIDsStr != "" || forumChatIDStr != "" || topicIDStr != "" {
 		config, err := adminConfigRepo.Get()
 		if err != nil {
 			config = &models.AdminConfig{AdminIDs: []int64{}}
 		}
 
-		if adminIDsStr != "" {
+		changed := false
+
+		if adminIDsStr != "" && len(config.AdminIDs) == 0 {
 			adminIDs := []int64{}
 			parts := strings.Split(adminIDsStr, ",")
 			for _, part := range parts {
@@ -77,23 +80,28 @@ func main() {
 			}
 			if len(adminIDs) > 0 {
 				config.AdminIDs = adminIDs
+				changed = true
 			}
 		}
 
-		if forumChatIDStr != "" {
+		if forumChatIDStr != "" && config.ForumChatID == 0 {
 			if forumChatID, err := strconv.ParseInt(forumChatIDStr, 10, 64); err == nil {
 				config.ForumChatID = forumChatID
+				changed = true
 			}
 		}
 
-		if topicIDStr != "" {
+		if topicIDStr != "" && config.TopicID == 0 {
 			if topicID, err := strconv.ParseInt(topicIDStr, 10, 64); err == nil {
 				config.TopicID = topicID
+				changed = true
 			}
 		}
 
-		if err := adminConfigRepo.Save(config); err != nil {
-			log.Printf("Warning: Failed to save admin config from environment: %v", err)
+		if changed {
+			if err := adminConfigRepo.Save(config); err != nil {
+				log.Printf("Warning: Failed to save admin config from environment: %v", err)
+			}
 		}
 	}
 
