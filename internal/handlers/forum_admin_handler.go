@@ -1943,6 +1943,14 @@ func (h *ForumAdminHandler) handleReplyConfirmation(ctx context.Context, userID,
 	}
 
 	h.adminStateRepo.Clear(userID)
+	if messageID > 0 {
+		if _, err := h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+		}); err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to delete reply preview message: %v", err)
+		}
+	}
 
 	h.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: chatID,
