@@ -1,4 +1,6 @@
-.PHONY: build build-ko push run test clean up down
+include .env
+
+.PHONY: build build-ko push run test clean up down deploy
 
 build:
 	docker compose build
@@ -23,3 +25,7 @@ up: down
 
 down:
 	docker compose down
+
+deploy:
+	ssh ${DEPLOY_HOST} "cd ~/go-telegram-admin/; git pull; go build -o bot ./cmd/bot/main.go; sudo systemctl restart telegram-bot"
+
