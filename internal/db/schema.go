@@ -72,7 +72,10 @@ CREATE INDEX IF NOT EXISTS idx_replies_message ON replies(chat_id, message_id);
 
 const migrations = `
 ALTER TABLE admin_state ADD COLUMN reply_target_chat_id INTEGER DEFAULT 0;
-ALTER TABLE admin_state ADD COLUMN reply_target_message_id INTEGER DEFAULT 0
+ALTER TABLE admin_state ADD COLUMN reply_target_message_id INTEGER DEFAULT 0;
+ALTER TABLE published_posts ADD COLUMN user_photo_id TEXT DEFAULT '';
+ALTER TABLE published_posts ADD COLUMN user_photo_message_id INTEGER DEFAULT 0;
+ALTER TABLE admin_state ADD COLUMN draft_user_photo_id TEXT DEFAULT ''
 `
 
 func InitSchema(db *sql.DB) error {

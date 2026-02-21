@@ -110,28 +110,35 @@ func main() {
 		Timeout: 30 * time.Second,
 	}
 
-	b, err := bot.New(botToken, bot.WithHTTPClient(15*time.Second, httpClient))
-	if err != nil {
-		log.Fatalf("Failed to create bot: %v", err)
-	}
-
-	for i := 0; i < 3; i++ {
-		log.Printf("Attempting to connect to Telegram API (attempt %d/3)...", i+1)
+	var b *bot.Bot
+	var botUser *tgmodels.User
+	const maxAttempts = 5
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			delay := time.Duration(i*3) * time.Second
+			log.Printf("Retrying in %v...", delay)
+			select {
+			case <-ctx.Done():
+				log.Fatal("Interrupted during startup")
+			case <-time.After(delay):
+			}
+		}
+		log.Printf("Connecting to Telegram API (attempt %d/%d)...", i+1, maxAttempts)
+		b, err = bot.New(botToken, bot.WithHTTPClient(15*time.Second, httpClient))
+		if err != nil {
+			log.Printf("Failed to create bot: %v", err)
+			continue
+		}
 		getMeCtx, getMeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err = b.GetMe(getMeCtx)
+		botUser, err = b.GetMe(getMeCtx)
 		getMeCancel()
 		if err == nil {
-			log.Printf("Successfully connected to Telegram API")
 			break
 		}
-		log.Printf("Failed to get bot info (attempt %d/3): %v", i+1, err)
-		if i < 2 {
-			log.Printf("Retrying in 2 seconds...")
-			time.Sleep(2 * time.Second)
-		}
+		log.Printf("Failed to get bot info: %v", err)
 	}
 	if err != nil {
-		log.Fatalf("Failed to get bot info after 3 attempts: %v", err)
+		log.Fatalf("Failed to connect to Telegram API after %d attempts", maxAttempts)
 	}
 
 	postManager := services.NewPostManager(publishedPostRepo, postTypeRepo, adminConfigRepo)
@@ -169,6 +176,9 @@ func main() {
 	}, logMiddleware)
 
 	log.Printf("Bot started. DB: %s", dbPath)
+	if botUser != nil {
+		log.Printf("Bot: @%s — https://t.me/%s", botUser.Username, botUser.Username)
+	}
 
 	b.Start(ctx)
 }

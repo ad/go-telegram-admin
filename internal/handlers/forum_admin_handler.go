@@ -110,11 +110,17 @@ func (h *ForumAdminHandler) HandleMessage(ctx context.Context, msg *tgmodels.Mes
 	case fsm.StateNewPostEnterText:
 		h.handlePostTextInput(ctx, msg, state)
 		return true
+	case fsm.StateNewPostEnterPhoto:
+		h.handleNewPostPhotoInput(ctx, msg, state)
+		return true
 	case fsm.StateEditPostEnterLink:
 		h.handleEditPostLinkInput(ctx, msg, state)
 		return true
 	case fsm.StateEditPostEnterText:
 		h.handleEditPostTextInput(ctx, msg, state)
+		return true
+	case fsm.StateEditPostEnterPhoto, fsm.StateEditPostEnterTypePhoto, fsm.StateEditPostEnterUserPhoto:
+		h.handleEditPostPhotoInput(ctx, msg, state)
 		return true
 	case fsm.StateDeletePostEnterLink:
 		h.handleDeletePostLinkInput(ctx, msg, state)
@@ -258,6 +264,161 @@ func (h *ForumAdminHandler) HandleCallback(ctx context.Context, callback *tgmode
 
 	if data == "confirm_post" {
 		h.handlePostConfirmation(ctx, callback.From.ID, chatID, messageID)
+		return true
+	}
+
+	if data == "post_add_photo" {
+		state, err := h.adminStateRepo.Get(callback.From.ID)
+		if err != nil || state == nil {
+			return false
+		}
+		state.CurrentState = fsm.StateNewPostEnterPhoto
+		if err := h.adminStateRepo.Save(state); err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+			return false
+		}
+		if messageID > 0 {
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+				ChatID:    chatID,
+				MessageID: messageID,
+			})
+		}
+		sentMsg, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "📷 Отправьте фотографию для прикрепления к посту",
+			ReplyMarkup: &tgmodels.InlineKeyboardMarkup{
+				InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+					{{Text: "❌ Отмена", CallbackData: "cancel"}},
+				},
+			},
+		})
+		if err == nil && sentMsg != nil {
+			state.LastBotMessageID = sentMsg.ID
+			h.adminStateRepo.Save(state)
+		}
+		return true
+	}
+
+	if data == "edit_post_text" {
+		state, err := h.adminStateRepo.Get(callback.From.ID)
+		if err != nil || state == nil {
+			return false
+		}
+		post, err := h.publishedPostRepo.GetByID(state.EditingPostID)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to get post: %v", err)
+			return false
+		}
+		state.CurrentState = fsm.StateEditPostEnterText
+		if err := h.adminStateRepo.Save(state); err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+			return false
+		}
+
+		previewText := fmt.Sprintf("Текущий текст поста:\n\n%s\n\nОтправьте новый текст.", post.Text)
+		var previewEntities []tgmodels.MessageEntity
+		if post.Entities != "" {
+			var ents []tgmodels.MessageEntity
+			if jsonErr := json.Unmarshal([]byte(post.Entities), &ents); jsonErr == nil {
+				prefix := "Текущий текст поста:\n\n"
+				offset := utf16Length(prefix)
+				for _, e := range ents {
+					e.Offset += offset
+					previewEntities = append(previewEntities, e)
+				}
+			}
+		}
+
+		keyboard := &tgmodels.InlineKeyboardMarkup{
+			InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+				{{Text: "❌ Отмена", CallbackData: "cancel"}},
+			},
+		}
+
+		var sentMsg *tgmodels.Message
+		if messageID > 0 {
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: messageID})
+		}
+		sentMsg, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        previewText,
+			Entities:    previewEntities,
+			ReplyMarkup: keyboard,
+		})
+		if err == nil && sentMsg != nil {
+			state.LastBotMessageID = sentMsg.ID
+			h.adminStateRepo.Save(state)
+		}
+		return true
+	}
+
+	if data == "edit_post_photo" || data == "edit_post_type_photo" || data == "edit_post_user_photo" {
+		state, err := h.adminStateRepo.Get(callback.From.ID)
+		if err != nil || state == nil {
+			return false
+		}
+		switch data {
+		case "edit_post_type_photo":
+			state.CurrentState = fsm.StateEditPostEnterTypePhoto
+		case "edit_post_user_photo":
+			state.CurrentState = fsm.StateEditPostEnterUserPhoto
+		default:
+			state.CurrentState = fsm.StateEditPostEnterPhoto
+		}
+		if err := h.adminStateRepo.Save(state); err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+			return false
+		}
+		keyboard := &tgmodels.InlineKeyboardMarkup{
+			InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+				{{Text: "❌ Отмена", CallbackData: "cancel"}},
+			},
+		}
+		if messageID > 0 {
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: messageID})
+		}
+		sentMsg, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        "📷 Отправьте новое фото",
+			ReplyMarkup: keyboard,
+		})
+		if err == nil && sentMsg != nil {
+			state.LastBotMessageID = sentMsg.ID
+			h.adminStateRepo.Save(state)
+		}
+		return true
+	}
+
+	if data == "delete_post_user_photo" {
+		state, err := h.adminStateRepo.Get(callback.From.ID)
+		if err != nil || state == nil {
+			return false
+		}
+		post, err := h.publishedPostRepo.GetByID(state.EditingPostID)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to get post: %v", err)
+			return false
+		}
+		if post.UserPhotoMessageID != 0 {
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+				ChatID:    post.ChatID,
+				MessageID: int(post.UserPhotoMessageID),
+			})
+			post.UserPhotoID = ""
+			post.UserPhotoMessageID = 0
+			if updateErr := h.publishedPostRepo.Update(post); updateErr != nil {
+				log.Printf("[FORUM_ADMIN] Failed to update post after user photo delete: %v", updateErr)
+			}
+		}
+		h.adminStateRepo.Clear(callback.From.ID)
+		if messageID > 0 {
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: messageID})
+		}
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "✅ Дополнительное фото удалено",
+		})
+		h.showAdminMenu(ctx, chatID, 0)
 		return true
 	}
 
@@ -470,7 +631,7 @@ func (h *ForumAdminHandler) HandleCallback(ctx context.Context, callback *tgmode
 			log.Printf("[FORUM_ADMIN] Failed to parse page: %v", err)
 			return false
 		}
-		h.showPostDetails(ctx, chatID, messageID, postID, page)
+		h.showPostDetails(ctx, callback.From.ID, chatID, messageID, postID, page)
 		return true
 	}
 
@@ -974,10 +1135,18 @@ func (h *ForumAdminHandler) handlePostTextInput(ctx context.Context, msg *tgmode
 		}
 	}
 
+	addPhotoLabel := "📸 Добавить фото"
+	if state.DraftUserPhotoID != "" {
+		addPhotoLabel = "📸 Изменить фото"
+	}
+
 	keyboard := &tgmodels.InlineKeyboardMarkup{
 		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
 			{
 				{Text: "✅ Подтвердить", CallbackData: "confirm_post"},
+			},
+			{
+				{Text: addPhotoLabel, CallbackData: "post_add_photo"},
 			},
 			{
 				{Text: "❌ Отмена", CallbackData: "cancel"},
@@ -1036,9 +1205,55 @@ func (h *ForumAdminHandler) handlePostConfirmation(ctx context.Context, userID, 
 		// log.Printf("[FORUM_ADMIN] Publishing with %d entities: %s", len(entities), state.DraftEntities)
 	}
 
-	var publishedMsg *tgmodels.Message
-	if state.DraftPhotoID != "" {
-		// log.Printf("[FORUM_ADMIN] Sending photo with caption and %d caption entities", len(entities))
+	hasTypePhoto := state.DraftPhotoID != ""
+	hasUserPhoto := state.DraftUserPhotoID != ""
+
+	publishedPost := &models.PublishedPost{
+		PostTypeID: state.SelectedTypeID,
+		ChatID:     config.ForumChatID,
+		TopicID:    config.TopicID,
+		Text:       state.DraftText,
+		PhotoID:    state.DraftPhotoID,
+		Entities:   state.DraftEntities,
+	}
+
+	if hasTypePhoto && hasUserPhoto {
+		msgs, sendErr := h.bot.SendMediaGroup(ctx, &bot.SendMediaGroupParams{
+			ChatID:          config.ForumChatID,
+			MessageThreadID: int(config.TopicID),
+			Media: []tgmodels.InputMedia{
+				&tgmodels.InputMediaPhoto{
+					Media:           state.DraftPhotoID,
+					Caption:         state.DraftText,
+					CaptionEntities: entities,
+				},
+				&tgmodels.InputMediaPhoto{
+					Media: state.DraftUserPhotoID,
+				},
+			},
+		})
+		if sendErr != nil {
+			err = sendErr
+		} else if len(msgs) >= 2 {
+			publishedPost.MessageID = int64(msgs[0].ID)
+			publishedPost.UserPhotoID = state.DraftUserPhotoID
+			publishedPost.UserPhotoMessageID = int64(msgs[1].ID)
+		}
+	} else if hasUserPhoto {
+		var publishedMsg *tgmodels.Message
+		publishedMsg, err = h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+			ChatID:          config.ForumChatID,
+			MessageThreadID: int(config.TopicID),
+			Photo:           &tgmodels.InputFileString{Data: state.DraftUserPhotoID},
+			Caption:         state.DraftText,
+			CaptionEntities: entities,
+		})
+		if err == nil && publishedMsg != nil {
+			publishedPost.MessageID = int64(publishedMsg.ID)
+			publishedPost.UserPhotoID = state.DraftUserPhotoID
+		}
+	} else if hasTypePhoto {
+		var publishedMsg *tgmodels.Message
 		publishedMsg, err = h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
 			ChatID:          config.ForumChatID,
 			MessageThreadID: int(config.TopicID),
@@ -1046,14 +1261,20 @@ func (h *ForumAdminHandler) handlePostConfirmation(ctx context.Context, userID, 
 			Caption:         state.DraftText,
 			CaptionEntities: entities,
 		})
+		if err == nil && publishedMsg != nil {
+			publishedPost.MessageID = int64(publishedMsg.ID)
+		}
 	} else {
-		// log.Printf("[FORUM_ADMIN] Sending message with %d entities", len(entities))
+		var publishedMsg *tgmodels.Message
 		publishedMsg, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:          config.ForumChatID,
 			MessageThreadID: int(config.TopicID),
 			Text:            state.DraftText,
 			Entities:        entities,
 		})
+		if err == nil && publishedMsg != nil {
+			publishedPost.MessageID = int64(publishedMsg.ID)
+		}
 	}
 
 	if err != nil {
@@ -1063,16 +1284,6 @@ func (h *ForumAdminHandler) handlePostConfirmation(ctx context.Context, userID, 
 			Text:   fmt.Sprintf("❌ Не удалось опубликовать пост: %v", err),
 		})
 		return
-	}
-
-	publishedPost := &models.PublishedPost{
-		PostTypeID: state.SelectedTypeID,
-		ChatID:     config.ForumChatID,
-		TopicID:    config.TopicID,
-		MessageID:  int64(publishedMsg.ID),
-		Text:       state.DraftText,
-		PhotoID:    state.DraftPhotoID,
-		Entities:   state.DraftEntities,
 	}
 
 	err = h.publishedPostRepo.Create(publishedPost)
@@ -1107,7 +1318,7 @@ func (h *ForumAdminHandler) handlePostConfirmation(ctx context.Context, userID, 
 
 	h.showAdminMenu(ctx, chatID, 0)
 
-	log.Printf("[FORUM_ADMIN] Post published successfully by user %d, message ID: %d", userID, publishedMsg.ID)
+	log.Printf("[FORUM_ADMIN] Post published successfully by user %d, message ID: %d", userID, publishedPost.MessageID)
 }
 
 func (h *ForumAdminHandler) handleEditPostLinkInput(ctx context.Context, msg *tgmodels.Message, state *models.AdminState) {
@@ -1141,6 +1352,24 @@ func (h *ForumAdminHandler) handleEditPostLinkInput(ctx context.Context, msg *tg
 	}
 
 	state.EditingPostID = post.ID
+
+	if post.PhotoID != "" || post.UserPhotoID != "" {
+		// Post has photo — show selection menu
+		state.CurrentState = fsm.StateEditPostSelectEdit
+		err = h.adminStateRepo.Save(state)
+		if err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+			h.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: msg.Chat.ID,
+				Text:   "❌ Ошибка сохранения состояния",
+			})
+			return
+		}
+		h.sendEditPostSelectMenu(ctx, msg.Chat.ID, 0, state)
+		log.Printf("[FORUM_ADMIN] Post %d found for editing by user %d (has photo, showing select menu)", post.ID, msg.From.ID)
+		return
+	}
+
 	state.CurrentState = fsm.StateEditPostEnterText
 	err = h.adminStateRepo.Save(state)
 	if err != nil {
@@ -1190,6 +1419,197 @@ func (h *ForumAdminHandler) handleEditPostLinkInput(ctx context.Context, msg *tg
 	log.Printf("[FORUM_ADMIN] Post %d found for editing by user %d", post.ID, msg.From.ID)
 }
 
+func (h *ForumAdminHandler) sendEditPostSelectMenu(ctx context.Context, chatID int64, messageID int, state *models.AdminState) {
+	post, err := h.publishedPostRepo.GetByID(state.EditingPostID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get post for edit menu: %v", err)
+		return
+	}
+
+	isMediaGroup := post.PhotoID != "" && post.UserPhotoID != ""
+
+	rows := [][]tgmodels.InlineKeyboardButton{
+		{{Text: "✏️ Изменить текст", CallbackData: "edit_post_text"}},
+	}
+
+	if isMediaGroup {
+		rows = append(rows,
+			[]tgmodels.InlineKeyboardButton{{Text: "📸 Изменить фото", CallbackData: "edit_post_type_photo"}},
+			[]tgmodels.InlineKeyboardButton{{Text: "📷 Изменить доп. фото", CallbackData: "edit_post_user_photo"}},
+			[]tgmodels.InlineKeyboardButton{{Text: "🚮 Удалить доп. фото", CallbackData: "delete_post_user_photo"}},
+		)
+	} else {
+		rows = append(rows, []tgmodels.InlineKeyboardButton{{Text: "📸 Изменить фото", CallbackData: "edit_post_photo"}})
+	}
+
+	rows = append(rows, []tgmodels.InlineKeyboardButton{{Text: "❌ Отмена", CallbackData: "cancel"}})
+
+	keyboard := &tgmodels.InlineKeyboardMarkup{InlineKeyboard: rows}
+	text := "Что хотите изменить в посте?"
+
+	var sentMsg *tgmodels.Message
+	if messageID > 0 {
+		sentMsg, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   messageID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+	} else {
+		sentMsg, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatID,
+			Text:        text,
+			ReplyMarkup: keyboard,
+		})
+	}
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to send edit select menu: %v", err)
+	} else if sentMsg != nil {
+		state.LastBotMessageID = sentMsg.ID
+		h.adminStateRepo.Save(state)
+	}
+}
+
+func (h *ForumAdminHandler) handleNewPostPhotoInput(ctx context.Context, msg *tgmodels.Message, state *models.AdminState) {
+	if len(msg.Photo) == 0 {
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "❌ Пожалуйста, отправьте фотографию",
+		})
+		return
+	}
+
+	// Take highest resolution photo (last element)
+	photo := msg.Photo[len(msg.Photo)-1]
+	state.DraftUserPhotoID = photo.FileID
+	state.CurrentState = fsm.StateNewPostConfirm
+	err := h.adminStateRepo.Save(state)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "❌ Ошибка сохранения состояния",
+		})
+		return
+	}
+
+	addPhotoLabel := "📸 Изменить фото"
+	keyboard := &tgmodels.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
+			{
+				{Text: "✅ Опубликовать", CallbackData: "confirm_post"},
+			},
+			{
+				{Text: addPhotoLabel, CallbackData: "post_add_photo"},
+			},
+			{
+				{Text: "❌ Отмена", CallbackData: "cancel"},
+			},
+		},
+	}
+
+	_, err = h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
+		ChatID:      msg.Chat.ID,
+		Photo:       &tgmodels.InputFileString{Data: photo.FileID},
+		Caption:     "Фото добавлено. Нажмите «Опубликовать» для публикации.",
+		ReplyMarkup: keyboard,
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to send photo preview: %v", err)
+	}
+
+	log.Printf("[FORUM_ADMIN] User photo saved for user %d", msg.From.ID)
+}
+
+func (h *ForumAdminHandler) handleEditPostPhotoInput(ctx context.Context, msg *tgmodels.Message, state *models.AdminState) {
+	if state.LastBotMessageID > 0 {
+		h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    msg.Chat.ID,
+			MessageID: state.LastBotMessageID,
+		})
+		state.LastBotMessageID = 0
+	}
+
+	if len(msg.Photo) == 0 {
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "❌ Пожалуйста, отправьте фотографию",
+		})
+		return
+	}
+
+	post, err := h.publishedPostRepo.GetByID(state.EditingPostID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to get post: %v", err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "❌ Ошибка получения поста",
+		})
+		return
+	}
+
+	newPhotoID := msg.Photo[len(msg.Photo)-1].FileID
+
+	// Determine which message to edit based on FSM state
+	var targetMessageID int64
+	switch state.CurrentState {
+	case fsm.StateEditPostEnterTypePhoto:
+		targetMessageID = post.MessageID
+	case fsm.StateEditPostEnterUserPhoto:
+		targetMessageID = post.UserPhotoMessageID
+	default: // StateEditPostEnterPhoto — single photo post
+		if post.UserPhotoMessageID != 0 {
+			targetMessageID = post.UserPhotoMessageID
+		} else {
+			targetMessageID = post.MessageID
+		}
+	}
+
+	_, err = h.bot.EditMessageMedia(ctx, &bot.EditMessageMediaParams{
+		ChatID:    post.ChatID,
+		MessageID: int(targetMessageID),
+		Media:     &tgmodels.InputMediaPhoto{Media: newPhotoID},
+	})
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to edit photo in Telegram: %v", err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   fmt.Sprintf("❌ Не удалось изменить фото: %v", err),
+		})
+		return
+	}
+
+	if targetMessageID == post.UserPhotoMessageID && post.UserPhotoMessageID != 0 {
+		post.UserPhotoID = newPhotoID
+	} else {
+		post.PhotoID = newPhotoID
+	}
+
+	err = h.publishedPostRepo.Update(post)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to update post in DB: %v", err)
+		h.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "❌ Ошибка сохранения изменений",
+		})
+		return
+	}
+
+	err = h.adminStateRepo.Clear(msg.From.ID)
+	if err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to clear state: %v", err)
+	}
+
+	h.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: msg.Chat.ID,
+		Text:   "✅ Фото успешно изменено!",
+	})
+
+	h.showAdminMenu(ctx, msg.Chat.ID, 0)
+
+	log.Printf("[FORUM_ADMIN] Photo of post %d edited successfully by user %d", post.ID, msg.From.ID)
+}
+
 func (h *ForumAdminHandler) handleEditPostTextInput(ctx context.Context, msg *tgmodels.Message, state *models.AdminState) {
 	if state.LastBotMessageID > 0 {
 		_, err := h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
@@ -1220,7 +1640,7 @@ func (h *ForumAdminHandler) handleEditPostTextInput(ctx context.Context, msg *tg
 		return
 	}
 
-	if post.PhotoID != "" {
+	if post.PhotoID != "" || post.UserPhotoID != "" {
 		_, err = h.bot.EditMessageCaption(ctx, &bot.EditMessageCaptionParams{
 			ChatID:          post.ChatID,
 			MessageID:       int(post.MessageID),
@@ -1427,7 +1847,16 @@ func (h *ForumAdminHandler) showPostList(ctx context.Context, chatID int64, mess
 			ReplyMarkup: keyboard,
 		})
 		if err != nil {
-			log.Printf("[FORUM_ADMIN] Failed to edit post list: %v", err)
+			// Previous message may be a photo — delete and send fresh text message
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: messageID})
+			_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: keyboard,
+			})
+			if err != nil {
+				log.Printf("[FORUM_ADMIN] Failed to send post list: %v", err)
+			}
 		}
 	} else {
 		_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
@@ -1441,12 +1870,19 @@ func (h *ForumAdminHandler) showPostList(ctx context.Context, chatID int64, mess
 	}
 }
 
-func (h *ForumAdminHandler) showPostDetails(ctx context.Context, chatID int64, messageID int, postID int64, page int) {
+func (h *ForumAdminHandler) showPostDetails(ctx context.Context, userID, chatID int64, messageID int, postID int64, page int) {
 	post, err := h.publishedPostRepo.GetByID(postID)
 	if err != nil {
 		log.Printf("[FORUM_ADMIN] Failed to get post %d: %v", postID, err)
 		return
 	}
+
+	// Save state so edit callbacks can find the post
+	h.adminStateRepo.Save(&models.AdminState{
+		UserID:        userID,
+		CurrentState:  fsm.StateEditPostSelectEdit,
+		EditingPostID: postID,
+	})
 
 	postType, err := h.postTypeRepo.GetByID(post.PostTypeID)
 	var typeLabel string
@@ -1465,36 +1901,63 @@ func (h *ForumAdminHandler) showPostDetails(ctx context.Context, chatID int64, m
 		preview = string(runes[:200]) + "..."
 	}
 
-	text := fmt.Sprintf("Пост #%d\nТип: %s\nДата: %s\n\nТекст:\n%s",
+	isMediaGroup := post.PhotoID != "" && post.UserPhotoID != ""
+
+	photoNote := ""
+	if isMediaGroup {
+		photoNote = "\n📷 + дополнительное фото"
+	}
+
+	text := fmt.Sprintf("Пост #%d\nТип: %s\nДата: %s%s\n\nТекст:\n%s",
 		post.ID,
 		typeLabel,
 		post.CreatedAt.Format("02.01.2006 15:04"),
+		photoNote,
 		preview,
 	)
 
-	keyboard := &tgmodels.InlineKeyboardMarkup{
-		InlineKeyboard: [][]tgmodels.InlineKeyboardButton{
-			{
-				{Text: "✏️ Редактировать", CallbackData: fmt.Sprintf("post_list_edit:%d:%d", post.ID, page)},
-			},
-			{
-				{Text: "🗑 Удалить", CallbackData: fmt.Sprintf("post_list_delete:%d:%d", post.ID, page)},
-			},
-			{
-				{Text: "← Назад", CallbackData: fmt.Sprintf("post_list_page:%d", page)},
-			},
-		},
+	// Build action keyboard (skip the separate "details" screen)
+	rows := [][]tgmodels.InlineKeyboardButton{
+		{{Text: "✏️ Изменить текст", CallbackData: "edit_post_text"}},
+	}
+	if isMediaGroup {
+		rows = append(rows,
+			[]tgmodels.InlineKeyboardButton{{Text: "📸 Изменить фото", CallbackData: "edit_post_type_photo"}},
+			[]tgmodels.InlineKeyboardButton{{Text: "📷 Изменить доп. фото", CallbackData: "edit_post_user_photo"}},
+			[]tgmodels.InlineKeyboardButton{{Text: "🚮 Удалить доп. фото", CallbackData: "delete_post_user_photo"}},
+		)
+	} else if post.PhotoID != "" || post.UserPhotoID != "" {
+		rows = append(rows, []tgmodels.InlineKeyboardButton{{Text: "📸 Изменить фото", CallbackData: "edit_post_photo"}})
+	}
+	rows = append(rows,
+		[]tgmodels.InlineKeyboardButton{{Text: "🗑 Удалить", CallbackData: fmt.Sprintf("post_list_delete:%d:%d", post.ID, page)}},
+		[]tgmodels.InlineKeyboardButton{{Text: "← Назад", CallbackData: fmt.Sprintf("post_list_page:%d", page)}},
+	)
+	keyboard := &tgmodels.InlineKeyboardMarkup{InlineKeyboard: rows}
+
+	// Delete old message first (regardless of type — text or photo)
+	if messageID > 0 {
+		h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    chatID,
+			MessageID: messageID,
+		})
 	}
 
-	if messageID > 0 {
-		_, err = h.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+	// Determine which photo to show (type photo takes priority as it carries the caption)
+	photoID := post.PhotoID
+	if photoID == "" {
+		photoID = post.UserPhotoID
+	}
+
+	if photoID != "" {
+		_, err = h.bot.SendPhoto(ctx, &bot.SendPhotoParams{
 			ChatID:      chatID,
-			MessageID:   messageID,
-			Text:        text,
+			Photo:       &tgmodels.InputFileString{Data: photoID},
+			Caption:     text,
 			ReplyMarkup: keyboard,
 		})
 		if err != nil {
-			log.Printf("[FORUM_ADMIN] Failed to edit post details: %v", err)
+			log.Printf("[FORUM_ADMIN] Failed to send post details photo: %v", err)
 		}
 	} else {
 		_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
@@ -1530,7 +1993,16 @@ func (h *ForumAdminHandler) showDeletePostConfirm(ctx context.Context, chatID in
 			ReplyMarkup: keyboard,
 		})
 		if err != nil {
-			log.Printf("[FORUM_ADMIN] Failed to edit delete confirm: %v", err)
+			// Previous message may be a photo — delete and send fresh text message
+			h.bot.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: messageID})
+			_, err = h.bot.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID:      chatID,
+				Text:        text,
+				ReplyMarkup: keyboard,
+			})
+			if err != nil {
+				log.Printf("[FORUM_ADMIN] Failed to send delete confirm: %v", err)
+			}
 		}
 	} else {
 		_, err := h.bot.SendMessage(ctx, &bot.SendMessageParams{
@@ -1555,14 +2027,9 @@ func (h *ForumAdminHandler) handleEditPostFromList(ctx context.Context, userID, 
 		return
 	}
 
-	err = h.adminStateRepo.Save(&models.AdminState{
+	newState := &models.AdminState{
 		UserID:        userID,
-		CurrentState:  fsm.StateEditPostEnterText,
 		EditingPostID: post.ID,
-	})
-	if err != nil {
-		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
-		return
 	}
 
 	if messageID > 0 {
@@ -1573,6 +2040,23 @@ func (h *ForumAdminHandler) handleEditPostFromList(ctx context.Context, userID, 
 		if err != nil {
 			log.Printf("[FORUM_ADMIN] Failed to delete message: %v", err)
 		}
+	}
+
+	if post.PhotoID != "" || post.UserPhotoID != "" {
+		newState.CurrentState = fsm.StateEditPostSelectEdit
+		if err = h.adminStateRepo.Save(newState); err != nil {
+			log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+			return
+		}
+		h.sendEditPostSelectMenu(ctx, chatID, 0, newState)
+		log.Printf("[FORUM_ADMIN] Edit from list: post %d has photo, showing select menu, user %d", postID, userID)
+		return
+	}
+
+	newState.CurrentState = fsm.StateEditPostEnterText
+	if err = h.adminStateRepo.Save(newState); err != nil {
+		log.Printf("[FORUM_ADMIN] Failed to save state: %v", err)
+		return
 	}
 
 	previewText := fmt.Sprintf("Текущий текст поста:\n\n%s\n\nОтправьте новый текст.", post.Text)
@@ -1606,11 +2090,8 @@ func (h *ForumAdminHandler) handleEditPostFromList(ctx context.Context, userID, 
 	if err != nil {
 		log.Printf("[FORUM_ADMIN] Failed to send edit prompt: %v", err)
 	} else if sentMsg != nil {
-		state, _ := h.adminStateRepo.Get(userID)
-		if state != nil {
-			state.LastBotMessageID = sentMsg.ID
-			h.adminStateRepo.Save(state)
-		}
+		newState.LastBotMessageID = sentMsg.ID
+		h.adminStateRepo.Save(newState)
 	}
 
 	log.Printf("[FORUM_ADMIN] Edit from list: post %d, user %d", postID, userID)

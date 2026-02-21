@@ -16,4 +16,5 @@ type AdminState struct {
 	LastBotMessageID      int
 	ReplyTargetChatID     int64
 	ReplyTargetMessageID  int64
+	DraftUserPhotoID      string
 }

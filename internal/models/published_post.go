@@ -9,7 +9,9 @@ type PublishedPost struct {
 	TopicID    int64
 	MessageID  int64
 	Text       string
-	PhotoID    string
-	Entities   string
-	CreatedAt  time.Time
+	PhotoID            string
+	Entities           string
+	UserPhotoID        string
+	UserPhotoMessageID int64
+	CreatedAt          time.Time
 }
